@@ -2,15 +2,16 @@ package astmtcpserver;
 
 import java.io.*;
 import java.net.*;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
+import java.util.logging.FileHandler;
+import java.util.logging.SimpleFormatter;
 
 public class AstmTcpServer 
 {
-
     private  int ASTM_PORT = 5000; //port ASTM en écoute
     private  String MLLP_HOST = "127.0.0.1"; // Adresse du connecteur EAI
     private  int MLLP_PORT = 6000;           // Port du connecteur EAI
@@ -29,7 +30,21 @@ public class AstmTcpServer
     private static boolean parseastm=false;
     private static boolean viamllp=false;
     private static boolean viafile=false;
+    private static String outputDirectory="";
     
+    
+    
+private static final Logger LOGGER = Logger.getLogger(AstmTcpServer.class.getName());
+static {
+try {
+FileHandler fh = new FileHandler("AstmTcpServer.log", true);
+fh.setFormatter(new SimpleFormatter());
+LOGGER.addHandler(fh);
+} catch (IOException e) {
+System.err.println("Erreur d'initialisation du logger : " + e.getMessage());
+}
+}
+
     
     /**********************************
      *     MAIN ENTRY POINT
@@ -37,13 +52,13 @@ public class AstmTcpServer
      **********************************/
     public static void main(String[] args) 
     {
-        if (args.length != 6) 
+        if (args.length != 7) 
         {
             System.err.println("AstmTcpServer erreur : nombre d'arguments incorrect.");
             System.err.println("");
             System.err.println("AstmTcpServer version 0.1 copyright(c) IsiHop.fr");
-            System.err.println("Utilisation : java AstmTcpServer <int ASTM_PORT> <int MLLP_PORT> <String MLLP_HOST> <bool parseAstm> <bool ViaMLLP> <bool FIleWriting>");
-            System.err.println("Exemple : java AstmTcpServer 5000 6000 127.0.0.1 false true false");
+            System.err.println("Utilisation : java AstmTcpServer <ASTM_PORT> <MLLP_PORT> <MLLP_HOST> <parseAstm> <viaMLLP> <viaFile> <outputDirectory>");
+            System.err.println("Exemple : java AstmTcpServer 5000 6000 127.0.0.1 false true false c:/mondossier");
             System.err.println("");
             System.exit(0);
         }
@@ -68,6 +83,8 @@ public class AstmTcpServer
             parseastm = Boolean.parseBoolean(args[3]);
             viamllp = Boolean.parseBoolean(args[4]);
             viafile = Boolean.parseBoolean(args[5]);
+            outputDirectory = args[6];
+
         }
         catch (NumberFormatException e) 
         {
@@ -172,7 +189,7 @@ public class AstmTcpServer
                         if (viafile)
                         {
                             String fullMessage = content + cr + lf;
-                            writeAstmMessage(fullMessage);
+                            writeAstmMessage(fullMessage, outputDirectory);
                         }
                     } else 
                     {
@@ -216,24 +233,43 @@ public class AstmTcpServer
     private void sendViaMLLP(String message) 
     {
         try (Socket mllpSocket = new Socket(MLLP_HOST, MLLP_PORT);
-             OutputStream mllpOut = mllpSocket.getOutputStream()) 
+         OutputStream mllpOut = mllpSocket.getOutputStream();
+         InputStream mllpIn = mllpSocket.getInputStream())
         {
-            ByteArrayOutputStream mllpMessage = new ByteArrayOutputStream();
-            mllpMessage.write(VT);
-            mllpMessage.write(message.getBytes());
-            mllpMessage.write(FS);
-            mllpMessage.write(CR);
+        // Encapsulation MLLP
+        ByteArrayOutputStream mllpMessage = new ByteArrayOutputStream();
+        mllpMessage.write(VT);
+        mllpMessage.write(message.getBytes(StandardCharsets.UTF_8));
+        mllpMessage.write(FS);
+        mllpMessage.write(CR);
 
-            mllpOut.write(mllpMessage.toByteArray());
-            mllpOut.flush();
+        // Envoi du message
+        mllpOut.write(mllpMessage.toByteArray());
+        mllpOut.flush();
+        System.out.println("Message envoyé via MLLP.");
 
-            System.out.println("Message envoyé via MLLP.");
+        // Lecture de l'ACK
+        ByteArrayOutputStream ackBuffer = new ByteArrayOutputStream();
+        int b;
+        while ((b = mllpIn.read()) != -1) {
+            ackBuffer.write(b);
+            if (b == FS) { // Fin du message ACK
+                mllpIn.read(); // Lire le CR suivant
+                break;
+            }
+        }
 
-        } catch (IOException e) 
-        {
-            System.err.println("Erreur lors de l'envoi MLLP : " + e.getMessage());
+        String ackMessage = ackBuffer.toString(StandardCharsets.UTF_8);
+        System.out.println("ACK reçu : " + ackMessage);
+
+        // Écriture dans le fichier log
+        LOGGER.log(Level.INFO, "ACK re\u00e7u : {0}", ackMessage);
+
+        } catch (IOException e) {
+        System.err.println("Erreur lors de l'envoi MLLP : " + e.getMessage());
         }
     }
+
     
     /*****************************
      * Simple parser format ASTM
@@ -264,25 +300,23 @@ public class AstmTcpServer
      * Ecrire le message sur disque
      * @param fullMessage 
      *******************************/
-    private void writeAstmMessage(String fullMessage) 
+    private void writeAstmMessage(String fullMessage, String outputDirectory) 
     {
-        PrintWriter pw=null;
+        PrintWriter pw = null;
         try {
-            //renommer le message avec dateheureseconde_numsequence.astm
-            int numsequence=(int)((Math.random()*9998)+1);
-            String nomfichier = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))+"_"+String.format("%04d",numsequence)+".astm";
-            pw = new PrintWriter(nomfichier);
+            int numsequence = (int)((Math.random() * 9998) + 1);
+            String nomfichier = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss")) + "_" + String.format("%04d", numsequence) + ".astm";
+            File dir = new File(outputDirectory);
+            if (!dir.exists()) dir.mkdirs(); //si n'existe pas le creer
+            File file = new File(dir, nomfichier);
+            pw = new PrintWriter(file);
             pw.write(fullMessage);
             pw.flush();
-            pw.close();
-            
-            String currentDirectory = System.getProperty("user.dir");
-            System.out.println("Ecriture du fichier dans le dossier : "+currentDirectory+" nom du fichier : "+nomfichier);
-            
+            System.out.println("Fichier écrit : " + file.getAbsolutePath());
         } catch (FileNotFoundException ex) {
-            Logger.getLogger(AstmTcpServer.class.getName()).log(Level.SEVERE, null, ex);
+            LOGGER.log(Level.SEVERE, "Erreur d'écriture du fichier ASTM", ex);
         } finally {
-            pw.close();
+            if (pw != null) pw.close();
         }
     }
 
